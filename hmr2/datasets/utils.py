@@ -523,8 +523,8 @@ def smpl_param_processing(smpl_params: Dict, has_smpl_params: Dict, rot: float, 
     return smpl_params, has_smpl_params
 
 
-
-def get_example(img_path: str|np.ndarray, center_x: float, center_y: float,
+from typing import Union
+def get_example(img_path: Union[str, np.ndarray], center_x: float, center_y: float,
                 width: float, height: float,
                 keypoints_2d: np.array, keypoints_3d: np.array,
                 smpl_params: Dict, has_smpl_params: Dict,
