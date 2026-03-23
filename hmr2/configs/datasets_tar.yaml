@@ -36,3 +36,4 @@ COCO-VAL:
     KEYPOINT_LIST: [0] # Dummy
 CMU-MOCAP:
     DATASET_FILE: hmr2_training_data/cmu_mocap.npz
+

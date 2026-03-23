@@ -51,7 +51,7 @@ class HMR2(pl.LightningModule):
         smpl_cfg = {k.lower(): v for k,v in dict(cfg.SMPL).items()}
         self.smpl = SMPL(**smpl_cfg)
 
-        # Buffer that shows whetheer we need to initialize ActNorm layers
+        # Buffer that shows whether we need to initialize ActNorm layers
         self.register_buffer('initialized', torch.tensor(False))
         # Setup renderer for visualization
         if init_renderer:

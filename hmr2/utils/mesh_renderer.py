@@ -45,7 +45,8 @@ class MeshRenderer:
     def __init__(self, cfg, faces=None):
         self.cfg = cfg
         self.focal_length = cfg.EXTRA.FOCAL_LENGTH
-        self.img_res = cfg.MODEL.IMAGE_SIZE
+        # self.img_res = cfg.MODEL.IMAGE_SIZE
+        self.img_res = cfg.MODEL.VIT_IMAGE_SIZE
         self.renderer = pyrender.OffscreenRenderer(viewport_width=self.img_res,
                                        viewport_height=self.img_res,
                                        point_size=1.0)
@@ -66,11 +67,14 @@ class MeshRenderer:
         rend_imgs = make_grid(rend_imgs, nrow=nrow, padding=padding)
         return rend_imgs
 
+    # 原图/mesh正试图/mesh侧视图/预测关键点/GT关键点
     def visualize_tensorboard(self, vertices, camera_translation, images, pred_keypoints, gt_keypoints, focal_length=None, nrow=5, padding=2):
         images_np = np.transpose(images, (0,2,3,1))
         rend_imgs = []
         pred_keypoints = np.concatenate((pred_keypoints, np.ones_like(pred_keypoints)[:, :, [0]]), axis=-1)
         pred_keypoints = self.img_res * (pred_keypoints + 0.5)
+        if gt_keypoints.shape[-1] == 2:
+            gt_keypoints = np.concatenate((gt_keypoints, np.ones_like(gt_keypoints)[:, :, [0]]), axis=-1)
         gt_keypoints[:, :, :-1] = self.img_res * (gt_keypoints[:, :, :-1] + 0.5)
         keypoint_matches = [(1, 12), (2, 8), (3, 7), (4, 6), (5, 9), (6, 10), (7, 11), (8, 14), (9, 2), (10, 1), (11, 0), (12, 3), (13, 4), (14, 5)]
         for i in range(vertices.shape[0]):
@@ -81,12 +85,14 @@ class MeshRenderer:
             extra_keypoints = pred_keypoints[i, -19:]
             for pair in keypoint_matches:
                 body_keypoints[pair[0], :] = extra_keypoints[pair[1], :]
+            # print(body_keypoints)
             pred_keypoints_img = render_openpose(255 * images_np[i].copy(), body_keypoints) / 255
             body_keypoints = gt_keypoints[i, :25]
             extra_keypoints = gt_keypoints[i, -19:]
             for pair in keypoint_matches:
-                if extra_keypoints[pair[1], -1] > 0 and body_keypoints[pair[0], -1] == 0:
-                    body_keypoints[pair[0], :] = extra_keypoints[pair[1], :]
+                # if extra_keypoints[pair[1], -1] > 0 and body_keypoints[pair[0], -1] == 0:  # 置信度筛选
+                body_keypoints[pair[0], :] = extra_keypoints[pair[1], :]
+            # print(body_keypoints)
             gt_keypoints_img = render_openpose(255*images_np[i].copy(), body_keypoints) / 255
             rend_imgs.append(torch.from_numpy(images[i]))
             rend_imgs.append(rend_img)

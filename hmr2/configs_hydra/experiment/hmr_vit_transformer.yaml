@@ -6,29 +6,54 @@ defaults:
 GENERAL:
   TOTAL_STEPS: 1_000_000
   LOG_STEPS: 1000
-  VAL_STEPS: 1000
+  VAL_STEPS: 0
   CHECKPOINT_STEPS: 10000
   CHECKPOINT_SAVE_TOP_K: 1
   NUM_WORKERS: 6
   PREFETCH_FACTOR: 2
+  VIS_STEPS: 1
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  max_steps: 10000              # 只跑这么多 step 看 loss
+  val_check_interval:  ${GENERAL.VAL_STEPS}        # ❗完全不跑 validation
+  check_val_every_n_epoch: null
+  enable_checkpointing: true
+  log_every_n_steps:  ${GENERAL.LOG_STEPS}
+  accelerator: gpu
+  devices: 1
 
 TRAIN:
   LR: 1e-5
   WEIGHT_DECAY: 1e-4
-  BATCH_SIZE: 48
+  BATCH_SIZE: 16
   LOSS_REDUCTION: mean
   NUM_TRAIN_SAMPLES: 2
   NUM_TEST_SAMPLES: 64
   POSE_2D_NOISE_RATIO: 0.01
   SMPL_PARAM_NOISE_RATIO: 0.005
+  NUM_WORKERS: 4
 
 MODEL:
-  IMAGE_SIZE: 256
+  VIT_IMAGE_SIZE: 256
+  IMAGE_SIZE: [1920, 1080]
   IMAGE_MEAN: [0.485, 0.456, 0.406]
   IMAGE_STD: [0.229, 0.224, 0.225]
+  CAMERA:
+    FOCAL_LENGTH: [1284.32, 1286.38]
+    TRANSLATION: [0.820506, 0.59704, 5.33591] 
+    CENTER: [959.5, 539.5]
+    ROTATION: 
+      - [-0.99713, 0.00504186, -0.0755413]
+      - [0.0221672, -0.93461, -0.354982]
+      - [-0.0723915, -0.355637, 0.931816]
+
   BACKBONE:
     TYPE: vit
     PRETRAINED_WEIGHTS: hmr2_training_data/vitpose_backbone.pth
+  IMU:
+    INPUT_DIM: 72
+    EMBED_DIM: 1280
   SMPL_HEAD:
     TYPE: transformer_decoder
     IN_CHANNELS: 2048

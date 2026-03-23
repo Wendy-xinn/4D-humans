@@ -13,6 +13,14 @@ from hmr2.utils.renderer import Renderer, cam_crop_to_full
 
 LIGHT_BLUE=(0.65098039,  0.74117647,  0.85882353)
 
+def print_out_info(out, prefix=""):
+    if isinstance(out, dict):
+        for k, v in out.items():
+            print_out_info(v, prefix + k + ".")
+    elif torch.is_tensor(out):
+        print(f"{prefix[:-1]}: shape={tuple(out.shape)}, dtype={out.dtype}, device={out.device}")
+    else:
+        print(f"{prefix[:-1]}: type={type(out)}")
 def main():
     import time
     start = time.time()
@@ -89,6 +97,7 @@ def main():
             batch = recursive_to(batch, device)
             with torch.no_grad():
                 out = model(batch)
+            print_out_info(out)
 
             pred_cam = out['pred_cam']
             box_center = batch["box_center"].float()

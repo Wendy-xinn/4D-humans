@@ -120,3 +120,132 @@ class SkeletonRenderer:
         img[::self.cfg.MODEL.IMAGE_SIZE, :, :] = 1.0
         img[:, (1+1+1)*self.cfg.MODEL.IMAGE_SIZE, :] = 0.5
         return img
+
+
+class SkeletonRendererPredOnly:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def __call__(
+        self,
+        pred_keypoints_3d: torch.Tensor,
+        images: np.ndarray = None,
+        camera_translation: torch.Tensor = None,
+    ) -> np.ndarray:
+
+        batch_size = pred_keypoints_3d.shape[0]
+
+        # -----------------------------
+        # Prepare tensors
+        # -----------------------------
+        pred_keypoints_3d = pred_keypoints_3d.detach().cpu().float()
+
+        if camera_translation is None:
+            camera_translation = torch.tensor(
+                [0.0, 0.0, 2 * self.cfg.EXTRA.FOCAL_LENGTH / (0.8 * self.cfg.MODEL.IMAGE_SIZE)],
+                dtype=torch.float32,
+            ).unsqueeze(0).repeat(batch_size, 1)
+        else:
+            camera_translation = camera_translation.detach().cpu().float()
+
+        if images is None:
+            images = np.zeros(
+                (batch_size,
+                 self.cfg.MODEL.IMAGE_SIZE,
+                 self.cfg.MODEL.IMAGE_SIZE,
+                 3),
+                dtype=np.float32,
+            )
+
+        H, W = images.shape[1], images.shape[2]
+
+        focal_length = torch.tensor(
+            [self.cfg.EXTRA.FOCAL_LENGTH, self.cfg.EXTRA.FOCAL_LENGTH],
+            dtype=torch.float32,
+        ).unsqueeze(0).repeat(batch_size, 1)
+
+        camera_center = torch.tensor(
+            [W / 2.0, H / 2.0],
+            dtype=torch.float32,
+        ).unsqueeze(0).repeat(batch_size, 1)
+
+        rotation = torch.eye(3).unsqueeze(0).repeat(batch_size, 1, 1)
+
+        # -----------------------------
+        # Project front view
+        # -----------------------------
+        pred_keypoints_2d = perspective_projection(
+            pred_keypoints_3d,
+            rotation=rotation,
+            translation=camera_translation,
+            focal_length=focal_length,
+            camera_center=camera_center,
+        ).cpu().numpy()
+
+        # Ensure (B, J, 2)
+        if pred_keypoints_2d.ndim != 3:
+            pred_keypoints_2d = pred_keypoints_2d.reshape(batch_size, -1, 2)
+
+        # Scale to pixel space if normalized
+        pred_keypoints_2d[..., 0] = np.clip(pred_keypoints_2d[..., 0], -1e4, 1e4)
+        pred_keypoints_2d[..., 1] = np.clip(pred_keypoints_2d[..., 1], -1e4, 1e4)
+
+        # Add confidence channel
+        conf = np.ones((*pred_keypoints_2d.shape[:2], 1), dtype=np.float32)
+        pred_keypoints_2d = np.concatenate([pred_keypoints_2d, conf], axis=-1)
+        pred_keypoints_2d = pred_keypoints_2d.astype(np.float32)
+
+        # -----------------------------
+        # Side view rotation
+        # -----------------------------
+        R = torch.tensor(
+            trimesh.transformations.rotation_matrix(
+                np.radians(90), [0, 1, 0]
+            )[:3, :3],
+            dtype=torch.float32,
+        )
+
+        pred_keypoints_3d_side = torch.einsum("bni,ij->bnj", pred_keypoints_3d, R)
+
+        pred_keypoints_2d_side = perspective_projection(
+            pred_keypoints_3d_side,
+            rotation=rotation,
+            translation=camera_translation,
+            focal_length=focal_length,
+            camera_center=camera_center,
+        ).cpu().numpy()
+
+        if pred_keypoints_2d_side.ndim != 3:
+            pred_keypoints_2d_side = pred_keypoints_2d_side.reshape(batch_size, -1, 2)
+
+        pred_keypoints_2d_side[..., 0] = np.clip(pred_keypoints_2d_side[..., 0], -1e4, 1e4)
+        pred_keypoints_2d_side[..., 1] = np.clip(pred_keypoints_2d_side[..., 1], -1e4, 1e4)
+
+        conf_side = np.ones((*pred_keypoints_2d_side.shape[:2], 1), dtype=np.float32)
+        pred_keypoints_2d_side = np.concatenate(
+            [pred_keypoints_2d_side, conf_side], axis=-1
+        ).astype(np.float32)
+
+        # -----------------------------
+        # Render images
+        # -----------------------------
+        rows = []
+
+        for i in range(batch_size):
+            img = images[i]
+
+            pred_img = render_openpose(
+                img.copy(),
+                pred_keypoints_2d[i]
+            ) / 255.0
+
+            pred_img_side = render_openpose(
+                np.zeros_like(img),
+                pred_keypoints_2d_side[i]
+            ) / 255.0
+
+            rows.append(np.concatenate([img, pred_img, pred_img_side], axis=1))
+
+        final_img = np.concatenate(rows, axis=0)
+
+        return final_img
