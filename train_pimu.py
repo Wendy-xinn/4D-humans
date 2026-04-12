@@ -75,8 +75,6 @@ class ImageIMUDataset(Dataset):
                     continue
                 # action 名（去掉 cam）
                 action = "_".join(action_cam.split("_")[:-1])
-                key = (subject, action)
-
                 pt_file = os.path.join(self.pt_root, f"{subject}_{action}.pt")
                 if not os.path.exists(pt_file):
                     print(f"[WARN] missing pt: {pt_file}")
@@ -84,6 +82,7 @@ class ImageIMUDataset(Dataset):
                 # 读取 pt（一次）
                 data = torch.load(pt_file, map_location="cpu")
                 N_pt = data["acc"].shape[0]
+                key = (subject, action)
 
                 # 收集图像
                 images = sorted([
@@ -146,7 +145,7 @@ class ImageIMUDataset(Dataset):
             )
 
         # ========= 3. crop + resize =========
-        img_patch_cv, _ = generate_image_patch_cv2(
+        img_patch_cv, trans = generate_image_patch_cv2(
             cvimg,
             center_x, center_y,
             bbox_size, bbox_size,
@@ -155,6 +154,7 @@ class ImageIMUDataset(Dataset):
             False, 1.0, 0,
             border_mode=cv2.BORDER_CONSTANT
         )
+        # img_patch_cv = cv2.resize(cvimg, (256, 192))
 
         # BGR → RGB（generate_image_patch 用的是 cv2）
         img_patch_cv = img_patch_cv[:, :, ::-1]
@@ -181,6 +181,7 @@ class ImageIMUDataset(Dataset):
             "imu_ori": ori.float(),
             "gt_pose": pose.float(),
             "gt_tran": tran.float(),
+            "cam_trans": torch.from_numpy(trans).float()
         }
 
 class ImageIMUDataModule(pl.LightningDataModule):
@@ -322,16 +323,21 @@ class HMR2WithIMU(pl.LightningModule):
             lr=self.cfg.TRAIN.LR,
             weight_decay=self.cfg.TRAIN.WEIGHT_DECAY,
         )
+        # 2. Discriminator 优化器 (只有在开启对抗损失时才需要)
+        if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
+            optimizer_disc = torch.optim.AdamW(
+                self.discriminator.parameters(),
+                lr=self.cfg.TRAIN.LR, # 或者使用专门的判别器学习率
+                weight_decay=self.cfg.TRAIN.WEIGHT_DECAY,
+            )
+            return [optimizer, optimizer_disc] # 返回列表供解包
         return optimizer
 
-    def forward(self, images, imu, gt_pose, gt_tran):
+    def forward(self, images, imu, gt_pose, gt_tran, cam_trans):
         """
         images: [B, 3, H, W]
         imu:    [B, imu_dim]
         """
-
-        # resize = Resize((256, 192))
-        # images = resize(images)
 
         B = images.shape[0]
 
@@ -390,29 +396,72 @@ class HMR2WithIMU(pl.LightningModule):
         # print(f"gt_pose shape: {gt_pose.shape}, gt_tran shape: {gt_tran.shape}")
         gt_shape = torch.zeros(gt_pose.shape[0], 10, device=gt_pose.device)
         pose_rotmat = batch_rodrigues(gt_pose.view(-1, 3)).view(gt_pose.shape[0], 24, 3, 3)
+        gt_tran = gt_tran.clone()
         smpl_output = self.smpl(
             betas=gt_shape,         # [B, 10]
             body_pose=pose_rotmat[:, 1:],  # [B, 23, 3, 3]
             global_orient=pose_rotmat[:, :1],  # [B, 1, 3, 3]
             transl=gt_tran          # [B, 3]
         )
-        gt_keypoints_3d = smpl_output.joints  # [B, J, 3]
+        gt_keypoints_3d = smpl_output.joints  # [B, J, 3]   世界坐标系
+        output['gt_keypoints_3d'] = gt_keypoints_3d
+        print(gt_keypoints_3d[0, :, 2].mean())
+        # gt_keypoints_3d = gt_keypoints_3d.clone()
+        # gt_keypoints_3d[..., 0] *= -1  # 翻转x
+        # gt_keypoints_3d[..., 2] *= -1   # 同时翻转 Z（前后方向）
+
+        # print(gt_keypoints_3d.mean(dim=1))
         # print(f"gt_keypoints_3d shape: {gt_keypoints_3d.shape}")
         # print(f"gt_keypoints_3d: {gt_keypoints_3d}")
-        output['gt_keypoints_3d'] = gt_keypoints_3d
-        device = gt_pose.device
-        # gt_keypoints_2d = perspective_projection(gt_keypoints_3d,
-        #                        translation=self.cam_translation.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 3]
-        #                        focal_length=self.cam_focal.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 2]
-        #                        camera_center=self.cam_center.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 2]
-        #                        rotation=self.cam_rotation.to(device).unsqueeze(0).expand(batch_size, -1, -1),  # [B, 3, 3]
-        #                  )
-       
-        # # 归一化
-        # img_w, img_h = self.cfg.MODEL.IMAGE_SIZE[0], self.cfg.MODEL.IMAGE_SIZE[1]
-        # gt_keypoints_2d[..., 0] = gt_keypoints_2d[..., 0] / img_w - 0.5
-        # gt_keypoints_2d[..., 1] = gt_keypoints_2d[..., 1] / img_h - 0.5
         
+        device = gt_pose.device
+        # # 相机焦距和中心也要随图像同步缩放
+        # scale_x = 256/1920
+        # scale_y = 192/1080
+        # cam_focal = self.cam_focal.to(device).clone()  # [2]
+        # cam_center =  self.cam_center.to(device).clone() # [2]
+
+        # cam_focal[0] *= scale_x   # fx
+        # cam_focal[1] *= scale_y   # fy
+
+        # cam_center[0] *= scale_x  # cx
+        # cam_center[1] *= scale_y  # cy
+
+        # cam_t = torch.tensor([[0, 0, 5]], device=device).expand(batch_size, -1)
+        # gt_keypoints_2d = perspective_projection(gt_keypoints_3d,
+        #                     translation=self.cam_translation.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 3]
+        #                     # translation=cam_t,  # [B, 3]
+        #                     focal_length=cam_focal.unsqueeze(0).expand(batch_size, -1),  # [B, 2]
+        #                     # focal_length=torch.tensor([[1000,1000]], device=device).expand(batch_size,-1),
+        #                     camera_center=cam_center.unsqueeze(0).expand(batch_size, -1),  # [B, 2]
+        #                     rotation=self.cam_rotation.to(device).unsqueeze(0).expand(batch_size, -1, -1),  # [B, 3, 3]
+        #                  )
+        # gt_keypoints_2d = perspective_projection(gt_keypoints_3d,
+        #                     translation=self.cam_translation.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 3]
+        #                     # translation=cam_t,  # [B, 3]
+        #                     focal_length=self.cam_focal.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 2]
+        #                     # focal_length=torch.tensor([[1000,1000]], device=device).expand(batch_size,-1),
+        #                     camera_center=self.cam_center.to(device).unsqueeze(0).expand(batch_size, -1),  # [B, 2]
+        #                     rotation=self.cam_rotation.to(device).unsqueeze(0).expand(batch_size, -1, -1),  # [B, 3, 3]
+        #                  )
+        # # print(cam_center)
+        # # ===== 把 2D 从原图坐标 → patch坐标 =====
+        # B, J, _ = gt_keypoints_2d.shape
+        # # (B, J, 3)
+        # ones = torch.ones(B, J, 1, device=gt_keypoints_2d.device)
+        # kp_homo = torch.cat([gt_keypoints_2d, ones], dim=2)
+        # # (B, 2, 3) @ (B, 3, J) → (B, 2, J)
+        # kp_patch = torch.bmm(cam_trans, kp_homo.permute(0, 2, 1))
+        # # (B, J, 2)
+        # gt_keypoints_2d_patch = kp_patch.permute(0, 2, 1)
+        
+       
+        # # # 归一化
+        # img_w, img_h = 256, 192
+        # gt_keypoints_2d_patch[..., 0] = gt_keypoints_2d_patch[..., 0] / img_w - 0.5
+        # gt_keypoints_2d_patch[..., 1] = gt_keypoints_2d_patch[..., 1] / img_h - 0.5
+        # output['gt_keypoints_2d'] = gt_keypoints_2d_patch
+
         # print(f"gt_keypoints_3d shape: {gt_keypoints_3d.shape}, gt_keypoints_2d shape: {gt_keypoints_2d.shape}")
         output['pred_cam'] = pred_cam
         output['pred_smpl_params'] = {k: v.clone() for k,v in pred_smpl_params.items()}
@@ -427,8 +476,11 @@ class HMR2WithIMU(pl.LightningModule):
         output['pred_cam_t'] = pred_cam_t
         output['focal_length'] = focal_length
         gt_keypoints_2d = perspective_projection(gt_keypoints_3d,
-                                                   translation=pred_cam_t,
-                                                   focal_length=focal_length / self.cfg.MODEL.VIT_IMAGE_SIZE)
+                                                translation=pred_cam_t,
+                                                focal_length=focal_length / self.cfg.MODEL.VIT_IMAGE_SIZE
+                                                #   focal_length=focal_length,
+                                                   )
+
         # print(f"gt_keypoints_2d shape: {gt_keypoints_2d.shape}")
         # print(f"gt_keypoints_2d: {gt_keypoints_2d}")
 
@@ -449,6 +501,10 @@ class HMR2WithIMU(pl.LightningModule):
         smpl_output = self.smpl(**{k: v.float() for k,v in pred_smpl_params.items()}, pose2rot=False)
         pred_keypoints_3d = smpl_output.joints
         pred_vertices = smpl_output.vertices
+        # # ==================== 关键：和 GT 做完全一样的翻转 ====================
+        # pred_keypoints_3d = pred_keypoints_3d.clone()
+        # pred_keypoints_3d[..., 0] *= -1   # X 轴
+        # pred_keypoints_3d[..., 2] *= -1   # Z 轴
         output['pred_keypoints_3d'] = pred_keypoints_3d.reshape(batch_size, -1, 3)
         # print(f"pred_keypoints_3d shape: {output['pred_keypoints_3d'].shape}")
         # print(f"pred_keypoints_3d: {output['pred_keypoints_3d']}")
@@ -458,26 +514,38 @@ class HMR2WithIMU(pl.LightningModule):
         focal_length = focal_length.reshape(-1, 2)
         pred_keypoints_2d = perspective_projection(pred_keypoints_3d,
                                                    translation=pred_cam_t,
-                                                   focal_length=focal_length / self.cfg.MODEL.VIT_IMAGE_SIZE)
+                                                focal_length=focal_length / self.cfg.MODEL.VIT_IMAGE_SIZE
+                                                # focal_length=focal_length,
+                                                   )
 
         output['pred_keypoints_2d'] = pred_keypoints_2d.reshape(batch_size, -1, 2)
         # print(f"pred_keypoints_2d shape: {output['pred_keypoints_2d'].shape}")
         # print(f"pred_keypoints_2d: {output['pred_keypoints_2d']}")
         # 可视化gt
         # import matplotlib.pyplot as plt
-        # from mpl_toolkits.mplot3d import Axes3D
-        # img = images[0].cpu().numpy().transpose(1, 2, 0) 
-        # keypoints_2d = output['gt_keypoints_2d'][0].detach().cpu().numpy() 
-        # plt.imshow(img.astype('uint8'))
-        # plt.scatter(keypoints_2d[:, 0], keypoints_2d[:, 1], c='r', s=10)
-        # plt.savefig("debug_2d.png")
-        # plt.close()
+        # images = images * torch.tensor([0.229, 0.224, 0.225], device=images.device).reshape(1,3,1,1)
+        # images = images + torch.tensor([0.485, 0.456, 0.406], device=images.device).reshape(1,3,1,1)
+        # images = torch.clamp(images, 0, 1)
+        # for i in range(6):
+        #     img = images[i].cpu().numpy().transpose(1, 2, 0)
+        #     keypoints_2d = output['gt_keypoints_2d'][i].detach().cpu().numpy() 
+        #     plt.imshow(img)
+        #     plt.scatter(keypoints_2d[:, 0], keypoints_2d[:, 1], c='r', s=10)
+        #     plt.savefig(f"debug_2dc_{i}.png")
+        #     plt.close()
         # keypoints_3d = output['gt_keypoints_3d'][0].detach().cpu().numpy() 
         # fig = plt.figure()
         # ax = fig.add_subplot(111, projection='3d')
         # ax.scatter(keypoints_3d[:, 0], keypoints_3d[:, 1], keypoints_3d[:, 2], c='b', s=10)
-        # plt.savefig("debug_3d.png")
+        # plt.savefig("debug_3dc.png")
         # plt.close()
+        # pre_keypoints_3d = output['pred_keypoints_3d'][0].detach().cpu().numpy() 
+        # fig = plt.figure()
+        # ax = fig.add_subplot(111, projection='3d')
+        # ax.scatter(pre_keypoints_3d[:, 0], pre_keypoints_3d[:, 1], pre_keypoints_3d[:, 2], c='b', s=10)
+        # plt.savefig("debug_pre_3dc.png")
+        # plt.close()
+
         
         return output
 
@@ -637,6 +705,38 @@ class HMR2WithIMU(pl.LightningModule):
                     )
         losses['total_loss'] = total_loss
         return losses
+    
+    def training_step_discriminator(self, batch,
+                                    body_pose: torch.Tensor,
+                                    betas: torch.Tensor,
+                                    optimizer: torch.optim.Optimizer) -> torch.Tensor:
+        """
+        Run a discriminator training step
+        Args:
+            batch (Dict): Dictionary containing mocap batch data
+            body_pose (torch.Tensor): Regressed body pose from current step
+            betas (torch.Tensor): Regressed betas from current step
+            optimizer (torch.optim.Optimizer): Discriminator optimizer
+        Returns:
+            torch.Tensor: Discriminator loss
+        """
+        batch_size = body_pose.shape[0]
+        gt_body_pose = batch['gt_pose']
+        gt_betas = torch.randn(body_pose.shape[0], 10, device=body_pose.device)*0.01
+        # gt_betas = batch['betas']
+        gt_rotmat = aa_to_rotmat(gt_body_pose.view(-1,3)).view(batch_size, -1, 3, 3)[:, 1:]
+
+        disc_fake_out = self.discriminator(body_pose.detach(), betas.detach())
+        loss_fake = ((disc_fake_out - 0.0) ** 2).sum() / batch_size
+        disc_real_out = self.discriminator(gt_rotmat, gt_betas)
+        loss_real = ((disc_real_out - 1.0) ** 2).sum() / batch_size
+        loss_disc = loss_fake + loss_real
+        loss = self.cfg.LOSS_WEIGHTS.ADVERSARIAL * loss_disc
+        optimizer.zero_grad()
+        self.manual_backward(loss)
+        optimizer.step()
+        return loss_disc.detach()
+    
     def training_step(self, batch, batch_idx):
         images = batch["image"]
         imu_acc = batch["imu_acc"]
@@ -648,10 +748,13 @@ class HMR2WithIMU(pl.LightningModule):
         ], dim=1)
         gt_pose = batch["gt_pose"]
         gt_tran = batch["gt_tran"]
+        cam_trans = batch["cam_trans"]
         batch_size = batch['image'].shape[0]
         optimizer = self.optimizers(use_pl_optimizer=True)
+        if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
+            optimizer, optimizer_disc = optimizer
 
-        output = self.forward(images, imu, gt_pose, gt_tran)
+        output = self.forward(images, imu, gt_pose, gt_tran, cam_trans)
         pred_smpl_params = output['pred_smpl_params']
 
         losses = self.compute_loss(batch, output, train=True)
@@ -668,6 +771,10 @@ class HMR2WithIMU(pl.LightningModule):
         optimizer.zero_grad()
         self.manual_backward(loss)
         optimizer.step()
+        if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
+            loss_disc = self.training_step_discriminator(batch, pred_smpl_params['body_pose'].reshape(batch_size, -1), pred_smpl_params['betas'].reshape(batch_size, -1), optimizer_disc)
+            losses['loss_gen'] = loss_adv
+            losses['loss_disc'] = loss_disc
 
         self.log("train/loss_pose", losses['pose_loss'], on_step=True, on_epoch=True, prog_bar=True, logger=True)
         self.log("train/loss_root_ori", losses['root_ori_loss'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
@@ -678,7 +785,7 @@ class HMR2WithIMU(pl.LightningModule):
         for loss_name, val in losses.items():
             summary_writer.add_scalar('train/' + loss_name, val.detach().item(), self.global_step)
 
-        num_images = min(2, batch_size)  # 最多可视化4张图
+        num_images = min(2, batch_size)  # 最多可视化2张图
         images = images * torch.tensor([0.229, 0.224, 0.225], device=images.device).reshape(1,3,1,1)
         images = images + torch.tensor([0.485, 0.456, 0.406], device=images.device).reshape(1,3,1,1)
 
@@ -694,8 +801,8 @@ class HMR2WithIMU(pl.LightningModule):
                     # print(gt_keypoints_2d.shape, pred_keypoints_2d.shape, pred_cam_t.shape, focal_length.shape)
                     # print(gt_keypoints_2d)
                     # print(pred_keypoints_2d)
-                    print(pred_keypoints_2d.min(), pred_keypoints_2d.max())
-                    print(gt_keypoints_2d.min(), gt_keypoints_2d.max())
+                    # print(pred_keypoints_2d.min(), pred_keypoints_2d.max())
+                    # print(gt_keypoints_2d.min(), gt_keypoints_2d.max())
                     predictions = self.mesh_renderer.visualize_tensorboard(pred_vertices[:num_images].cpu().numpy(),
                                                                pred_cam_t[:num_images].cpu().numpy(),
                                                                images[:num_images].cpu().numpy(),

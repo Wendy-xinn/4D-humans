@@ -2,4 +2,4 @@
 DATA:
   TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/extracted_images
   TRAIN_PT_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/preprocessed_gt
-  
+  TRAIN_BBOX_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/bbox_cache

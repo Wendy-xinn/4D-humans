@@ -81,6 +81,10 @@ def main():
 
         # Detect humans in image
         det_out = detector(img_cv2)
+        # print(type(det_out))
+        print(dir(det_out))
+        print(det_out.keys())
+        print(det_out['instances'])
 
         det_instances = det_out['instances']
         valid_idx = (det_instances.pred_classes==0) & (det_instances.scores > 0.5)
@@ -97,13 +101,14 @@ def main():
             batch = recursive_to(batch, device)
             with torch.no_grad():
                 out = model(batch)
-            print_out_info(out)
+            # print_out_info(out)
 
             pred_cam = out['pred_cam']
             box_center = batch["box_center"].float()
             box_size = batch["box_size"].float()
             img_size = batch["img_size"].float()
             scaled_focal_length = model_cfg.EXTRA.FOCAL_LENGTH / model_cfg.MODEL.IMAGE_SIZE * img_size.max()
+            # 原图裁剪后送入模型推理，所以得到的相机参数也要进行还原到原图的坐标系下
             pred_cam_t_full = cam_crop_to_full(pred_cam, box_center, box_size, img_size, scaled_focal_length).detach().cpu().numpy()
 
             # Render the result

@@ -89,7 +89,7 @@ def perspective_projection(points: torch.Tensor,
     K[:,2,2] = 1.
     K[:,:-1, -1] = camera_center
 
-    # Transform points
+    # Transform points  坐标变换（world -> camera）
     points = torch.einsum('bij,bkj->bki', rotation, points)
     points = points + translation.unsqueeze(1)
 
