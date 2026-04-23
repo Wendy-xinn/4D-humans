@@ -13,10 +13,40 @@ from .heads import build_smpl_head
 from .discriminator import Discriminator
 from .losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from . import SMPL
+import torch.nn as nn
 
 log = get_pylogger(__name__)
 
-class HMR2(pl.LightningModule):
+class IMUProjector(nn.Module):
+    def __init__(self, imu_dim=72, embed_dim=1280, num_tokens=4):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.embed_dim = embed_dim
+        self.imu_dim = imu_dim
+
+        self.proj = nn.Sequential(
+            nn.Linear(imu_dim, embed_dim // 2),
+            nn.ReLU(),  
+            nn.Linear(embed_dim // 2, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim * num_tokens)
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, imu_data):
+        if imu_data is None or imu_data.numel() == 0:
+            return None
+        if imu_data.dim() == 3:
+            imu_data = imu_data.squeeze(1)
+        assert imu_data.shape[1] == self.imu_dim, \
+            f"Expected imu_dim={self.imu_dim}, but got {imu_data.shape}"
+
+        imu_data = imu_data.to(dtype=self.proj[0].weight.dtype)
+        x = self.proj(imu_data)
+        x = x.view(-1, self.num_tokens, self.embed_dim)
+        return self.norm(x)
+    
+class HMR2pimu(pl.LightningModule):
 
     def __init__(self, cfg: CfgNode, init_renderer: bool = True):
         """
@@ -31,14 +61,45 @@ class HMR2(pl.LightningModule):
 
         self.cfg = cfg
         # Create backbone feature extractor
-        self.backbone = create_backbone(cfg)
+        self.backbone_ori = create_backbone(cfg) # 这个参数要冻结
+        self.backbone_copy = create_backbone(cfg)
+        self.IMUEncoder = IMUProjector(cfg.MODEL.IMU.INPUT_DIM, cfg.MODEL.IMU.EMBED_DIM)
+
+        # Zero-initialize IMUEncoder parameters
+        for param in self.IMUEncoder.parameters():
+            nn.init.zeros_(param)
+
+        # ViT 有多少个 Block，我们就需要多少个 Zero-Conv
+        num_blocks = len(self.backbone_ori.blocks)
+        embed_dim = self.backbone_ori.embed_dim
+        self.zero_convs = nn.ModuleList([
+            nn.Linear(embed_dim, embed_dim) for _ in range(num_blocks)
+        ])
+        for conv in self.zero_convs:
+            nn.init.zeros_(conv.weight)
+            nn.init.zeros_(conv.bias)
+
+        self.fusion_mlp_linear = nn.Linear(embed_dim, embed_dim)
+        nn.init.zeros_(self.fusion_mlp_linear.weight)
+        nn.init.zeros_(self.fusion_mlp_linear.bias)
+
         if cfg.MODEL.BACKBONE.get('PRETRAINED_WEIGHTS', None):
             log.info(f'Loading backbone weights from {cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS}')
             self.backbone.load_state_dict(torch.load(cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS, map_location='cpu')['state_dict'])
 
+        for p in self.backbone_ori.parameters():
+            p.requires_grad = False
+        self.backbone_ori.eval()
+        for p in self.backbone_copy.parameters():
+            p.requires_grad = True  # copy 是可训练的
+        
+
         # Create SMPL head
         self.smpl_head = build_smpl_head(cfg)
-
+        for p in self.smpl_head.parameters():
+            p.requires_grad = False
+        self.smpl_head.eval()
+        
         # Create discriminator
         if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
             self.discriminator = Discriminator()
@@ -366,51 +427,5 @@ class HMR2(pl.LightningModule):
         loss = self.compute_loss(batch, output, train=False)
         output['loss'] = loss
         self.tensorboard_logging(batch, output, self.global_step, train=False)
-        # pred_keypoints_3d = output['pred_keypoints_3d'].detach()
-        # pred_keypoints_3d = pred_keypoints_3d[:,None,:,:]
-        # batch_size = pred_keypoints_3d.shape[0]
-        # num_samples = pred_keypoints_3d.shape[1]
-        # gt_keypoints_3d = batch['keypoints_3d'][:, :, :-1].unsqueeze(1).repeat(1, num_samples, 1, 1)
-
-        # # Align predictions and ground truth such that the pelvis location is at the origin
-        # pred_keypoints_3d -= pred_keypoints_3d[:, :, [self.cfg.EXTRA.PELVIS_IND]]
-        # gt_keypoints_3d -= gt_keypoints_3d[:, :, [self.cfg.EXTRA.PELVIS_IND]]
-        # keypoint_list = [25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 43]
-        # # EVAL_JOINT_MAP = {
-        # #     8: 0, 12: 1, 9: 2, 29: 4, 26: 5, 30: 7, 25: 8,
-        # #     1: 12, 34: 16, 33: 17, 35: 18, 32: 19, 36: 20, 31: 21
-        # # }
-        # # PRED_EVAL_IDX = list(EVAL_JOINT_MAP.keys())   # [8, 12, 9, 29, 26, 30, 25, 1, 34, 33, 35, 32, 36, 31]
-        # # GT_EVAL_IDX   = list(EVAL_JOINT_MAP.values()) # [0, 1, 2, 4, 5, 7, 8, 12, 16, 17, 18, 19, 20, 21]
-        # # # 1. 索引对齐 → 统一为 [B, 14, 3]
-        # # pred_sel = pred_keypoints_3d[:, PRED_EVAL_IDX, :]
-        # # gt_sel   = gt_keypoints_3d[:, GT_EVAL_IDX, :]
-        
-        # # # 2. 调用你原有的 eval_pose（内部会做 Procrustes 对齐）
-        # mpjpe, pa_mpjpe = eval_pose(pred_keypoints_3d.reshape(batch_size * num_samples, -1, 3)[:, self.keypoint_list], gt_keypoints_3d.reshape(batch_size * num_samples, -1 ,3)[:, keypoint_list])
-        # mpjpe = mpjpe.reshape(batch_size, num_samples)
-        # pa_mpjpe = pa_mpjpe.reshape(batch_size, num_samples)
-        # batch_mpjpe = mpjpe.mean(axis=1)      
-        # batch_pa_mpjpe = pa_mpjpe.mean(axis=1) 
-        # mean_mpjpe = float(np.mean(batch_mpjpe))
-        # mean_pa_mpjpe = float(np.mean(batch_pa_mpjpe))
-
-        # # Compute 2d keypoint errors
-        # pred_keypoints_2d = output['pred_keypoints_2d'].detach()
-        # pred_keypoints_2d = pred_keypoints_2d[:,None,:,:]
-        # gt_keypoints_2d = batch['keypoints_2d'][:,None,:,:].repeat(1, num_samples, 1, 1)
-        # conf = gt_keypoints_2d[:, :, :, -1].clone()
-        # kp_err = torch.nn.functional.mse_loss(
-        #                 pred_keypoints_2d,
-        #                 gt_keypoints_2d[:, :, :, :-1],
-        #                 reduction='none'
-        #             ).sum(dim=3)
-        # kp_l2_loss = (conf * kp_err).mean(dim=2)
-        # batch_kp_l2 = kp_l2_loss.mean(dim=1)       # [B]
-        # mean_kp_l2 = float(batch_kp_l2.mean().cpu().numpy())
-        
-        # self.log('val/mpjpe', mean_mpjpe, sync_dist=True, on_epoch=True, prog_bar=True)
-        # self.log('val/pa_mpjpe', mean_pa_mpjpe, sync_dist=True, on_epoch=True, prog_bar=True)
-        # self.log('val/kp2d_l2', mean_kp_l2, sync_dist=True, on_epoch=True, prog_bar=True)
 
         return output

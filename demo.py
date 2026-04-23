@@ -102,6 +102,11 @@ def main():
             with torch.no_grad():
                 out = model(batch)
             # print_out_info(out)
+            for key, value in out.items():
+                if hasattr(value, 'shape'):
+                    print(f"{key}: {value.shape}")
+                else:
+                    print(f"{key}: {type(value)}")
 
             pred_cam = out['pred_cam']
             box_center = batch["box_center"].float()

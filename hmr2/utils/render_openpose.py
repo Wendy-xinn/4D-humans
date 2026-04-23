@@ -135,6 +135,51 @@ def render_body_keypoints(img: np.array,
     pose_scales = [1]
     return render_keypoints(img, body_keypoints, pairs, colors, thickness_circle_ratio, thickness_line_ratio_wrt_circle, pose_scales, 0.1)
 
+def render_gt_24_keypoints(img: np.array,
+                           body_keypoints: np.array) -> np.array:
+    """
+    专门适配 24 点 GT 的渲染函数，仿照 OpenPose 格式
+    """
+    # 1. 确保输入点的数量正确 (N, 3)
+    # 如果你的 GT 只有 (N, 2)，需要补一列置信度 1.0
+    if body_keypoints.shape[1] == 2:
+        conf = np.ones((body_keypoints.shape[0], 1))
+        body_keypoints = np.concatenate([body_keypoints, conf], axis=-1)
+
+    # 2. 定义 SMPL 24 点的标准连线 (Pairs)
+    # 确保所有索引都在 0-23 之间
+    pairs = [
+        [0, 1], [0, 2], [0, 3], [1, 4], [2, 5], [3, 6],
+        [4, 7], [5, 8], [6, 9], [7, 10], [8, 11], [9, 12],
+        [12, 15], [9, 13], [9, 14], [13, 16], [14, 17],
+        [16, 18], [17, 19], [18, 20], [19, 21], [20, 22], [21, 23]
+    ]
+    pairs = np.array(pairs).reshape(-1, 2)
+
+    # 3. 定义颜色 (24 组 RGB)
+    # 这里可以根据需要调整颜色，或者简单重复
+    base_colors = [
+        [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [255, 0, 255], [0, 255, 255]
+    ]
+    colors = np.array(base_colors * 4).astype(np.float32) # 扩展到 24 组
+
+    # 4. 其他参数保持与原代码一致
+    thickness_circle_ratio = 1./75. * np.ones(body_keypoints.shape[0])
+    thickness_line_ratio_wrt_circle = 0.75
+    pose_scales = [1]
+
+    # 调用你原来的核心渲染函数
+    return render_keypoints(
+        img, 
+        body_keypoints, 
+        pairs, 
+        colors, 
+        thickness_circle_ratio, 
+        thickness_line_ratio_wrt_circle, 
+        pose_scales, 
+        threshold=0.1
+    )
+
 def render_openpose(img: np.array,
                     body_keypoints: np.array) -> np.array:
     """

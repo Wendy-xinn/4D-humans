@@ -13,22 +13,28 @@ from pathlib import Path
 
 import hydra
 import pytorch_lightning as pl
+import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.plugins.environments import SLURMEnvironment
 
 from yacs.config import CfgNode
-from hmr2.configs import dataset_config
+from hmr2.configs import dataset_config, CACHE_DIR_4DHUMANS, get_config
 from hmr2.datasets import HMR2DataModule
-from hmr2.models.hmr2 import HMR2
+# from hmr2.models.hmr2 import HMR2
+from hmr2.models.hmr2pimu import HMR2pimu
 from hmr2.utils.pylogger import get_pylogger
 from hmr2.utils.misc import task_wrapper, log_hyperparameters
+from train_pimu_3DPW import ImageDataModule
+from datetime import datetime
 
 # HACK reset the signal handling so the lightning is free to set it
 # Based on https://github.com/facebookincubator/submitit/issues/1709#issuecomment-1246758283
 import signal
 signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+
+DEFAULT_CHECKPOINT=f'{CACHE_DIR_4DHUMANS}/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt'
 
 log = get_pylogger(__name__)
 
@@ -51,13 +57,24 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     save_configs(cfg, dataset_cfg, cfg.paths.output_dir)
 
     # Setup training and validation datasets
-    datamodule = HMR2DataModule(cfg, dataset_cfg)
+    datamodule = ImageDataModule(cfg, dataset_cfg)
 
     # Setup model
-    model = HMR2(cfg)
+    model = HMR2pimu(cfg)
+    # print(model.smpl.joint_map)
+    checkpoint_path = DEFAULT_CHECKPOINT
+    log.info(f"Loading pretrained checkpoint from {checkpoint_path}")
+    # model_cfg = str(Path(checkpoint_path).parent.parent / 'model_config.yaml')
+    # model_cfg = get_config(model_cfg, update_cachedir=True)
+    # model = HMR2.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg, weights_only=False )
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    missing, unexpected = model.load_state_dict(ckpt['state_dict'], strict=False)
+    # model = HMR2.load_from_checkpoint(checkpoint_path, cfg=cfg)  # 里面有discriminator会报错
+   
 
     # Setup Tensorboard logger
-    logger = TensorBoardLogger(os.path.join(cfg.paths.output_dir, 'tensorboard'), name='', version='', default_hp_metric=False)
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger = TensorBoardLogger(os.path.join(cfg.paths.output_dir, 'tensorboard'), name=f"run_{run_id}", version='', default_hp_metric=False)
     loggers = [logger]
 
     # Setup checkpoint saving

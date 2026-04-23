@@ -9,7 +9,7 @@ import trimesh
 import cv2
 import torch.nn.functional as F
 
-from .render_openpose import render_openpose
+from .render_openpose import render_openpose, render_gt_24_keypoints
 
 def create_raymond_lights():
     import pyrender
@@ -73,11 +73,11 @@ class MeshRenderer:
         rend_imgs = []
         pred_keypoints = np.concatenate((pred_keypoints, np.ones_like(pred_keypoints)[:, :, [0]]), axis=-1)
         pred_keypoints = self.img_res * (pred_keypoints + 0.5)
-        if gt_keypoints.shape[-1] == 2:
-            gt_keypoints = np.concatenate((gt_keypoints, np.ones_like(gt_keypoints)[:, :, [0]]), axis=-1)
-        # gt_keypoints[:, :, :-1] = self.img_res * (gt_keypoints[:, :, :-1] + 0.5)
-        gt_keypoints[..., 0] = (gt_keypoints[..., 0] + 0.5) * 256
-        gt_keypoints[..., 1] = (gt_keypoints[..., 1] + 0.5) * 192
+        # if gt_keypoints.shape[-1] == 2:
+        #     gt_keypoints = np.concatenate((gt_keypoints, np.ones_like(gt_keypoints)[:, :, [0]]), axis=-1)
+        gt_keypoints[:, :, :-1] = self.img_res * (gt_keypoints[:, :, :-1] + 0.5)
+        # gt_keypoints[..., 0] = (gt_keypoints[..., 0] + 0.5) * 256
+        # gt_keypoints[..., 1] = (gt_keypoints[..., 1] + 0.5) * 192
         keypoint_matches = [(1, 12), (2, 8), (3, 7), (4, 6), (5, 9), (6, 10), (7, 11), (8, 14), (9, 2), (10, 1), (11, 0), (12, 3), (13, 4), (14, 5)]
         for i in range(vertices.shape[0]):
             fl = self.focal_length
@@ -92,10 +92,11 @@ class MeshRenderer:
             body_keypoints = gt_keypoints[i, :25]
             extra_keypoints = gt_keypoints[i, -19:]
             for pair in keypoint_matches:
-                # if extra_keypoints[pair[1], -1] > 0 and body_keypoints[pair[0], -1] == 0:  # 置信度筛选
-                body_keypoints[pair[0], :] = extra_keypoints[pair[1], :]
+                if extra_keypoints[pair[1], -1] > 0 and body_keypoints[pair[0], -1] == 0:  # 置信度筛选
+                    body_keypoints[pair[0], :] = extra_keypoints[pair[1], :]
             # print(body_keypoints)
-            gt_keypoints_img = render_openpose(255*images_np[i].copy(), body_keypoints) / 255
+            gt_keypoints_img = render_gt_24_keypoints(255*images_np[i].copy(), body_keypoints) / 255
+            # gt_keypoints_img = render_openpose(255*images_np[i].copy(), body_keypoints) / 255
             rend_imgs.append(torch.from_numpy(images[i]))
             rend_imgs.append(rend_img)
             rend_imgs.append(rend_img_side)

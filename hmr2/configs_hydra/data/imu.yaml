@@ -1,5 +1,9 @@
 # @package _global_
 DATA:
-  TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/extracted_images
-  TRAIN_PT_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/preprocessed_gt
+  # TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/extracted_images
+  TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/imageFiles
+  # TRAIN_PT_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/preprocessed_gt
+  TRAIN_PT_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/train
+  TRAIN_VAL_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/validation
+  TRAIN_TEST_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/test
   TRAIN_BBOX_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/bbox_cache
