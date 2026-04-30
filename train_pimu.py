@@ -47,6 +47,7 @@ root = pyrootutils.setup_root(
 
 LIGHT_BLUE = (0.65, 0.74, 0.86)
 
+
 class ImageIMUDataset(Dataset):
     def __init__(self, image_root,  pt_root, cfg):
         self.image_root = os.path.abspath(image_root)

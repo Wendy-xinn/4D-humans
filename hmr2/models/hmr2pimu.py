@@ -14,11 +14,14 @@ from .discriminator import Discriminator
 from .losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from . import SMPL
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
+import copy
 
 log = get_pylogger(__name__)
+CHECKPOINT = "/media/zhanghongwen/Elements1/wxPro2/4D-Humans/logs/train/runs/hmr2_adjust/checkpoints/epoch=35-step=50000.ckpt"
 
 class IMUProjector(nn.Module):
-    def __init__(self, imu_dim=72, embed_dim=1280, num_tokens=4):
+    def __init__(self, imu_dim=360, embed_dim=1280, num_tokens=4):  # imu_dim = 72 * 5(window size)
         super().__init__()
         self.num_tokens = num_tokens
         self.embed_dim = embed_dim
@@ -83,10 +86,19 @@ class HMR2pimu(pl.LightningModule):
         nn.init.zeros_(self.fusion_mlp_linear.weight)
         nn.init.zeros_(self.fusion_mlp_linear.bias)
 
-        if cfg.MODEL.BACKBONE.get('PRETRAINED_WEIGHTS', None):
-            log.info(f'Loading backbone weights from {cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS}')
-            self.backbone.load_state_dict(torch.load(cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS, map_location='cpu')['state_dict'])
-
+        # if cfg.MODEL.BACKBONE.get('PRETRAINED_WEIGHTS', None):
+        #     log.info(f'Loading backbone weights from {cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS}')
+        #     self.backbone.load_state_dict(torch.load(cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS, map_location='cpu')['state_dict'])
+        if self.cfg.MODEL.BACKBONE.load_pretrained:
+            ckpt = torch.load(CHECKPOINT, map_location='cpu')
+            state_dict = ckpt['state_dict']  # Lightning checkpoint
+            vit_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith('backbone.'):
+                    vit_state_dict[k.replace('backbone.', '')] = v
+            self.backbone_ori.load_state_dict(vit_state_dict, strict=False)
+            self.backbone_copy = copy.deepcopy(self.backbone_ori) 
+        
         for p in self.backbone_ori.parameters():
             p.requires_grad = False
         self.backbone_ori.eval()
@@ -127,9 +139,34 @@ class HMR2pimu(pl.LightningModule):
         self.automatic_optimization = False
 
     def get_parameters(self):
-        all_params = list(self.smpl_head.parameters())
-        all_params += list(self.backbone.parameters())
-        return all_params
+        # all_params = list(self.smpl_head.parameters())
+        # all_params += list(self.backbone.parameters())
+        # return all_params
+        """
+        返回所有 requires_grad=True 的参数
+        注意：backbone_ori 和 smpl_head 已冻结，不应加入
+        """
+        params = []
+        
+        # ✅ 1. 可训练的 backbone_copy
+        params += list(self.backbone_copy.parameters())
+        
+        # ✅ 2. 新添加的 IMU 融合模块
+        params += list(self.IMUEncoder.parameters())
+        params += list(self.zero_convs.parameters())
+        params += list(self.fusion_mlp_linear.parameters())
+        
+        # ✅ 3. smpl_head 如果解冻了才加入（当前是冻结的）
+        # if any(p.requires_grad for p in self.smpl_head.parameters()):
+        #     params += list(self.smpl_head.parameters())
+        
+        # ✅ 4. 防御性检查：过滤掉意外冻结的参数
+        trainable_params = [p for p in params if p.requires_grad]
+        
+        if len(trainable_params) == 0:
+            self.logger.warning("⚠️ No trainable parameters found! Check requires_grad flags.")
+        
+        return trainable_params
 
     def configure_optimizers(self) -> Tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
         """
@@ -137,20 +174,39 @@ class HMR2pimu(pl.LightningModule):
         Returns:
             Tuple[torch.optim.Optimizer, torch.optim.Optimizer]: Model and discriminator optimizers
         """
-        optimizers = []
-        param_groups = [{'params': filter(lambda p: p.requires_grad, self.get_parameters()), 'lr': self.cfg.TRAIN.LR}]
+        # optimizers = []
+        # param_groups = [{'params': filter(lambda p: p.requires_grad, self.get_parameters()), 'lr': self.cfg.TRAIN.LR}]
 
-        optimizer = torch.optim.AdamW(params=param_groups,
-                                        lr=self.cfg.TRAIN.LR,
-                                        weight_decay=self.cfg.TRAIN.WEIGHT_DECAY)
-        optimizers.append(optimizer)
+        # optimizer = torch.optim.AdamW(params=param_groups,
+        #                                 lr=self.cfg.TRAIN.LR,
+        #                                 weight_decay=self.cfg.TRAIN.WEIGHT_DECAY)
+        # optimizers.append(optimizer)
+        # if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
+        #     optimizer_disc = torch.optim.AdamW(params=self.discriminator.parameters(),
+        #                                         lr=self.cfg.TRAIN.LR,
+        #                                         weight_decay=self.cfg.TRAIN.WEIGHT_DECAY)
+        #     optimizers.append(optimizer_disc)
+
+        # return optimizers
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": self.backbone_copy.parameters()},
+                {"params": self.IMUEncoder.parameters()},
+                {"params": self.fusion_mlp_linear.parameters()},
+                {"params": self.zero_convs.parameters()},
+            ],
+            lr=self.cfg.TRAIN.LR,
+            weight_decay=self.cfg.TRAIN.WEIGHT_DECAY,
+        )
+        # 2. Discriminator 优化器 (只有在开启对抗损失时才需要)
         if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
-            optimizer_disc = torch.optim.AdamW(params=self.discriminator.parameters(),
-                                                lr=self.cfg.TRAIN.LR,
-                                                weight_decay=self.cfg.TRAIN.WEIGHT_DECAY)
-            optimizers.append(optimizer_disc)
-
-        return optimizers
+            optimizer_disc = torch.optim.AdamW(
+                self.discriminator.parameters(),
+                lr=self.cfg.TRAIN.LR, # 或者使用专门的判别器学习率
+                weight_decay=self.cfg.TRAIN.WEIGHT_DECAY,
+            )
+            return [optimizer, optimizer_disc] # 返回列表供解包
+        return optimizer
 
     def forward_step(self, batch: Dict, train: bool = False) -> Dict:
         """
@@ -165,12 +221,60 @@ class HMR2pimu(pl.LightningModule):
         # Use RGB image as input
         x = batch['img']
         batch_size = x.shape[0]
+        imu_rot = batch['imu_rot']  # [B, W, 6, 3, 3]
+        imu_acc = batch['imu_acc']  # [B, W, 6, 3]
+        B, W = imu_rot.shape[:2]
+        # 可选：IMU 窗口展平 + 拼接 [B, W*6*(9+3)] → [B, D_imu]
+        # 如果你的 IMUEncoder 期望 [B, D_imu] 格式:
+        imu_input = torch.cat([
+            imu_rot.reshape(B, W, -1),  # [B, W, 54]
+            imu_acc.reshape(B, W, -1)   # [B, W, 18]
+        ], dim=-1).reshape(B, -1)  # [B, W*72] = [B, 360]
+        with torch.no_grad():
+            # ✅ 保持原始的中心裁剪 (HMR2 特殊处理)
+            x_cropped = x[:, :, :, 32:-32]  # [B, 3, H, W-64]
+            
+            # ViT patch embed + pos embed
+            x_ori, (Hp, Wp) = self.backbone_ori.patch_embed(x_cropped)  # [B, N, C]
+            if self.backbone_ori.pos_embed is not None:
+                # 跳过 cls token (如果有的话)
+                x_ori = x_ori + self.backbone_ori.pos_embed[:, 1:, :]
+            
+            # Forward through frozen blocks
+            for blk in self.backbone_ori.blocks:
+                if self.backbone_ori.use_checkpoint:
+                    x_ori = checkpoint.checkpoint(blk, x_ori)
+                else:
+                    x_ori = blk(x_ori)
+            
+            feat_ori = self.backbone_ori.last_norm(x_ori)  # [B, N, C]
+        imu_token = self.IMUEncoder(imu_input)
+        # ControlNet 标准做法：token → patch-wise control
+        imu_control = imu_token.mean(dim=1, keepdim=True)   # [B, 1, C]
+        # imu_control = imu_control.expand(B, N, C)             # [B, N, C]
 
-        # Compute conditioning features using the backbone
-        # if using ViT backbone, we need to use a different aspect ratio
-        conditioning_feats = self.backbone(x[:,:,:,32:-32])
+        # ===== 3. ControlNet-style：逐层注入 =====
+        # 利用广播机制，不需要显式 expand (省显存)
+        tokens = feat_ori
+        for i, blk in enumerate(self.backbone_copy.blocks):
+            tokens = blk(tokens)
+            tokens = tokens + self.zero_convs[i](imu_control)
 
-        pred_smpl_params, pred_cam, _ = self.smpl_head(conditioning_feats)
+        feat_fuse = self.backbone_copy.last_norm(tokens)
+
+        delta = self.fusion_mlp_linear(feat_fuse)  # nn.Linear(C, C)
+
+        # ===== Residual add (ControlNet core) =====
+        fused_features = feat_ori + delta
+        B, N, C = fused_features.shape
+        x_smpl = fused_features.permute(0, 2, 1).reshape(B, C, Hp, Wp)
+        pred_smpl_params, pred_cam, _ = self.smpl_head(x_smpl) 
+
+        # # Compute conditioning features using the backbone
+        # # if using ViT backbone, we need to use a different aspect ratio
+        # conditioning_feats = self.backbone(x[:,:,:,32:-32])
+
+        # pred_smpl_params, pred_cam, _ = self.smpl_head(conditioning_feats)
 
         # Store useful regression outputs to the output dict
         output = {}

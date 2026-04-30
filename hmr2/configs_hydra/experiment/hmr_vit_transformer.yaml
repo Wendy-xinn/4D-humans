@@ -54,8 +54,10 @@ MODEL:
   BACKBONE:
     TYPE: vit
     PRETRAINED_WEIGHTS: hmr2_training_data/vitpose_backbone.pth
+    RESUME_FROM_CHECKPOINT: false
+    load_pretrained: True
   IMU:
-    INPUT_DIM: 72
+    INPUT_DIM: 360
     EMBED_DIM: 1280
   SMPL_HEAD:
     TYPE: transformer_decoder

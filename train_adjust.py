@@ -35,6 +35,7 @@ import signal
 signal.signal(signal.SIGUSR1, signal.SIG_DFL)
 
 DEFAULT_CHECKPOINT=f'{CACHE_DIR_4DHUMANS}/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt'
+CHECKPOINT = "/media/zhanghongwen/Elements1/wxPro2/4D-Humans/logs/train/runs/hmr2_adjust/checkpoints/epoch=35-step=50000.ckpt"
 
 log = get_pylogger(__name__)
 
@@ -62,15 +63,28 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     # Setup model
     model = HMR2pimu(cfg)
     # print(model.smpl.joint_map)
-    checkpoint_path = DEFAULT_CHECKPOINT
+    checkpoint_path = CHECKPOINT
     log.info(f"Loading pretrained checkpoint from {checkpoint_path}")
     # model_cfg = str(Path(checkpoint_path).parent.parent / 'model_config.yaml')
     # model_cfg = get_config(model_cfg, update_cachedir=True)
     # model = HMR2.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg, weights_only=False )
-    ckpt = torch.load(checkpoint_path, map_location='cpu')
-    missing, unexpected = model.load_state_dict(ckpt['state_dict'], strict=False)
+
+    # ckpt = torch.load(checkpoint_path, map_location='cpu')
+    # missing, unexpected = model.load_state_dict(ckpt['state_dict'], strict=False)
+
     # model = HMR2.load_from_checkpoint(checkpoint_path, cfg=cfg)  # 里面有discriminator会报错
    
+    # 🔑 关键：区分两种场景
+    if cfg.get('RESUME_FROM_CHECKPOINT', False):
+        # 🔄 场景A: 恢复训练（从 last.ckpt 继续）
+        # 让 Lightning 自动处理，但需确保 model.on_load_checkpoint 已重写
+        ckpt_path = 'last'  # 或具体路径
+        log.info(f"Resuming training from {ckpt_path}")
+    else:
+        # 🚀 场景B: 首次训练（从预训练 backbone 开始）
+        # __init__ 中已手动加载预训练权重，这里禁用自动恢复
+        ckpt_path = None
+        log.info(f"Starting new training with pretrained backbone")
 
     # Setup Tensorboard logger
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -114,7 +128,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         log_hyperparameters(object_dict)
 
     # Train the model
-    trainer.fit(model, datamodule=datamodule, ckpt_path='last')
+    trainer.fit(model, datamodule=datamodule, ckpt_path=ckpt_path)
     log.info("Fitting done")
 
 

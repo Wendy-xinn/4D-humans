@@ -71,7 +71,7 @@ class ImageIMUDataset(Dataset):
         for pt_file in pt_files:
             data = torch.load(pt_file, map_location="cpu")
             # ✅ 关键：加载对齐索引
-            img_ids = data['img_frame_ids'].astype(np.int64)  # [N_img] 30Hz→60Hz映射
+            img_ids = data['img_ids'].long() # [N_img] 30Hz→60Hz映射
             campose_valid = data["campose_valid"]
             
             N_img = len(img_ids)
@@ -80,7 +80,7 @@ class ImageIMUDataset(Dataset):
                     continue
                 
                 # ✅ 记录：图像帧k → 60Hz中心帧idx
-                center_60hz = img_ids[k]  # 如: k=0 → center=0; k=1 → center=2
+                center_60hz = img_ids[k].item()   # 如: k=0 → center=0; k=1 → center=2  tensor -> int
                 self.samples.append({
                     "pt_path": pt_file,
                     "img_idx_30hz": k,           # 图像帧索引(30Hz)
@@ -161,7 +161,7 @@ class ImageIMUDataset(Dataset):
         # ✅ 2. GT: 取中心帧的 60Hz pose/trans/joints (用于监督)
         pose_60hz = data["pose_60Hz"][center_60hz]      # [72]
         trans_60hz = data["trans_60Hz"][center_60hz]    # [3]
-        joints_3d_60hz = data["jointPositions"][center_60hz].view(-1, 3)  # [J, 3]
+        joints_3d = data["jointPositions"][s["img_idx_30hz"]].view(-1, 3)  # [J, 3]
         betas = data["shape"]                            # [10]
         # ✅ 3. 相机参数 (30Hz图像帧对应)
         cam_intrinsics = data["cam_intrinsics"]
@@ -188,8 +188,8 @@ class ImageIMUDataset(Dataset):
         # keypoints_3d = torch.cat([joints_3d_rh, conf], dim=1).cpu().numpy()  # [J, 4]
         # ================= 坐标系转换 =================
         # 1. 世界系 → 相机系
-        # ⚠️ 注意：cam_pose是30Hz的，但joints_3d_60hz是60Hz中心帧，时间上对齐✅
-        joints_h = torch.cat([joints_3d_60hz, torch.ones_like(joints_3d_60hz[:, :1])], dim=-1)
+        # ⚠️ 注意：cam_pose是30Hz的
+        joints_h = torch.cat([joints_3d, torch.ones_like(joints_3d[:, :1])], dim=-1)
         joints_cam_3dpw = (cam_pose @ joints_h.T).T[:, :3]
 
         # print("joints_3d.shape:", joints_3d.shape)
@@ -219,7 +219,7 @@ class ImageIMUDataset(Dataset):
             'body_pose': np.array([1.0], dtype=np.float32),
             'betas': np.array([1.0], dtype=np.float32),
         }
-
+    
         # 2D keypoints
         # keypoints_2d = self.project_to_2d(joints_3d, cam_intrinsics, cam_pose).cpu().numpy()
 
@@ -535,27 +535,6 @@ class ImageDataset(Dataset):
         return item
 
 
-class ImageIMUDataModule(pl.LightningDataModule):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-
-    def setup(self, stage=None):
-        self.train_set = ImageIMUDataset(
-            self.cfg.DATA.TRAIN_IMG_ROOT,
-            self.cfg.DATA.TRAIN_PT_ROOT,
-            self.cfg,
-            train=True
-        )
-
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_set,
-            batch_size=self.cfg.TRAIN.BATCH_SIZE,
-            shuffle=True,
-            num_workers=self.cfg.TRAIN.NUM_WORKERS,
-            pin_memory=True,
-        )
 
 class ImageDataModule(pl.LightningDataModule):
     def __init__(self, cfg, dataset_cfg):
@@ -567,13 +546,13 @@ class ImageDataModule(pl.LightningDataModule):
         self.test_dataset = None
 
     def setup(self, stage=None):
-        self.train_dataset = ImageDataset(
+        self.train_dataset = ImageIMUDataset(
             self.cfg.DATA.TRAIN_IMG_ROOT,
             self.cfg.DATA.TRAIN_PT_ROOT,
             self.cfg,
             train=True
         )
-        self.val_dataset = ImageDataset(
+        self.val_dataset = ImageIMUDataset(
             self.cfg.DATA.TRAIN_IMG_ROOT,
             self.cfg.DATA.TRAIN_VAL_ROOT,
             self.cfg,

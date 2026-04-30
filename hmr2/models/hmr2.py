@@ -109,12 +109,14 @@ class HMR2(pl.LightningModule):
         # if using ViT backbone, we need to use a different aspect ratio
         conditioning_feats = self.backbone(x[:,:,:,32:-32])
 
-        pred_smpl_params, pred_cam, _ = self.smpl_head(conditioning_feats)
+        pred_smpl_params, pred_cam, _, pred_smpl_params2, pred_cam2, _ = self.smpl_head(conditioning_feats)
 
         # Store useful regression outputs to the output dict
         output = {}
         output['pred_cam'] = pred_cam
         output['pred_smpl_params'] = {k: v.clone() for k,v in pred_smpl_params.items()}
+        output['pred_cam_ego'] = pred_cam2
+        output['pred_smpl_params_ego'] = {k: v.clone() for k,v in pred_smpl_params2.items()}
 
         # Compute camera translation
         device = pred_smpl_params['body_pose'].device
@@ -130,6 +132,9 @@ class HMR2(pl.LightningModule):
         pred_smpl_params['global_orient'] = pred_smpl_params['global_orient'].reshape(batch_size, -1, 3, 3)
         pred_smpl_params['body_pose'] = pred_smpl_params['body_pose'].reshape(batch_size, -1, 3, 3)
         pred_smpl_params['betas'] = pred_smpl_params['betas'].reshape(batch_size, -1)
+        pred_smpl_params2['global_orient'] = pred_smpl_params2['global_orient'].reshape(batch_size, -1, 3, 3)
+        pred_smpl_params2['body_pose'] = pred_smpl_params2['body_pose'].reshape(batch_size, -1, 3, 3)
+        pred_smpl_params2['betas'] = pred_smpl_params2['betas'].reshape(batch_size, -1)
         smpl_output = self.smpl(**{k: v.float() for k,v in pred_smpl_params.items()}, pose2rot=False)
         pred_keypoints_3d = smpl_output.joints
         pred_vertices = smpl_output.vertices
@@ -142,6 +147,14 @@ class HMR2(pl.LightningModule):
                                                    focal_length=focal_length / self.cfg.MODEL.IMAGE_SIZE)
 
         output['pred_keypoints_2d'] = pred_keypoints_2d.reshape(batch_size, -1, 2)
+
+        smpl_output2 = self.smpl(**{k: v.float() for k,v in pred_smpl_params2.items()}, pose2rot=False)
+        pred_keypoints_3d2 = smpl_output2.joints
+        pred_vertices2 = smpl_output2.vertices
+        output['pred_keypoints_3d_ego'] = pred_keypoints_3d2.reshape(batch_size, -1, 3)[:, :15, :] 
+        output['pred_vertices_ego'] = pred_vertices2.reshape(batch_size, -1, 3)
+
+
         return output
 
     def compute_loss(self, batch: Dict, output: Dict, train: bool = True) -> torch.Tensor:
