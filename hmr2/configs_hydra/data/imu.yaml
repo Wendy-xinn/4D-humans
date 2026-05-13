@@ -1,7 +1,9 @@
 # @package _global_
 DATA:
   # TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/extracted_images
-  TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/imageFiles
+  # TRAIN_IMG_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/imageFiles
+  TRAIN_IMG_ROOT: /media/zhanghongwen/Elements1/wxPro2/egobody
+  SPLIT_FILE: /media/zhanghongwen/Elements1/wxPro2/egobody/data_splits.csv
   # TRAIN_PT_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/TotalCapture/preprocessed_gt
   TRAIN_PT_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/train
   TRAIN_VAL_ROOT: /home/zhanghongwen/wxPro2/sam-3d-body/data/3DPW/validation
